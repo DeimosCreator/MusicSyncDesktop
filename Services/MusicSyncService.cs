@@ -2,8 +2,10 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace MusicSyncDesktop
 {
@@ -12,16 +14,24 @@ namespace MusicSyncDesktop
         private readonly string _localPath;
         private readonly string _token;
         private readonly string _yandexPath;
+        private readonly HttpClient _client;
 
+        // Добавляем конструктор для инициализации клиента с таймаутом
         public MusicSyncService(string localPath, string token, string yandexPath)
         {
             _localPath = localPath;
             _token = token;
             _yandexPath = yandexPath;
+
+            // Инициализация HttpClient с таймаутом
+            _client = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
         }
 
         public async Task SyncAsync()
         {
+            // Проверяем и создаём папку, если она не существует
+            await CreateDirectoryIfNotExistsAsync(_yandexPath);
+
             // Загрузка файлов на Яндекс.Диск
             var filesToUpload = Directory.GetFiles(_localPath);
             foreach (var file in filesToUpload)
@@ -32,86 +42,121 @@ namespace MusicSyncDesktop
 
         public async Task DownloadAllAsync()
         {
-            // 1. Получаем список файлов с Яндекс.Диска
-            var fileUrls = await GetFileUrlsFromDiskAsync();
+            List<string> fileUrls;
+            try
+            {
+                fileUrls = await GetFileUrlsFromDiskAsync();
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine("Network error fetching file list: " + ex.Message);
+                return;
+            }
 
-            // 2. Скачиваем файлы
             foreach (var fileUrl in fileUrls)
             {
-                // 3. Скачиваем каждый файл в локальную папку
-                await DownloadFileAsync(fileUrl);
+                try
+                {
+                    await DownloadFileAsync(fileUrl);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error downloading '{fileUrl}': {ex.Message}");
+                }
             }
         }
 
         private async Task<List<string>> GetFileUrlsFromDiskAsync()
         {
             var fileUrls = new List<string>();
+            _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("OAuth", _token);
 
-            using (var client = new HttpClient())
+            string encodedPath = Uri.EscapeDataString(_yandexPath);
+            var requestUrl = $"https://cloud-api.yandex.net/v1/disk/resources?path={encodedPath}&limit=1000";
+
+            try
             {
-                client.DefaultRequestHeaders.Add("Authorization", $"OAuth {_token}");
-
-                // Кодируем путь правильно
-                string encodedPath = Uri.EscapeUriString(_yandexPath);
-                var requestUrl = $"https://cloud-api.yandex.net/v1/disk/resources?path={encodedPath}";
-
-                // Получаем список ресурсов
-                var response = await client.GetStringAsync(requestUrl);
-
-                if (response != null)
+                var response = await _client.GetAsync(requestUrl);
+                if (!response.IsSuccessStatusCode)
                 {
-                    try
+                    Console.WriteLine($"Ошибка при получении списка файлов. Статус: {response.StatusCode}");
+                    Console.WriteLine(await response.Content.ReadAsStringAsync());
+                    return null;
+                }
+
+                var responseContent = await response.Content.ReadAsStringAsync();
+                var json = JsonConvert.DeserializeObject<JObject>(responseContent);
+
+                var items = json["_embedded"]?["items"] as JArray;
+                if (items == null || items.Count == 0)
+                {
+                    Console.WriteLine("Полученные данные не содержат файлов или они имеют неверный формат.");
+                    return fileUrls;
+                }
+
+                foreach (var item in items)
+                {
+                    if (item["type"]?.ToString() == "file")
                     {
-                        // Разбираем JSON-ответ
-                        var jsonResponse = JsonConvert.DeserializeObject<YandexDiskResponse>(response);
-                        if (jsonResponse != null)
+                        var path = item["path"]?.ToString();
+                        if (!string.IsNullOrEmpty(path))
                         {
-                            foreach (var resource in jsonResponse.Items)
-                            {
-                                if (resource.Type == "file")
-                                {
-                                    fileUrls.Add(resource.PublicUrl); // Можно также использовать ресурс для получения прямого URL
-                                }
-                            }
+                            fileUrls.Add(path);
                         }
                     }
-                    catch (JsonException ex)
-                    {
-                        Console.WriteLine($"Ошибка парсинга JSON: {ex.Message}");
-                    }
                 }
-                else
-                {
-                    Console.WriteLine("Не удалось получить ответ от Яндекс.Диска.");
-                }
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine("Ошибка при выполнении HTTP-запроса: " + ex.Message);
+            }
+            catch (JsonException ex)
+            {
+                Console.WriteLine($"Ошибка парсинга JSON: {ex.Message}");
             }
 
             return fileUrls;
         }
 
 
-        private async Task DownloadFileAsync(string fileUrl)
+        private async Task DownloadFileAsync(string filePath)
         {
-            var fileName = Path.GetFileName(fileUrl);
+            var fileName = Path.GetFileName(filePath);
             var downloadPath = Path.Combine(_localPath, fileName);
 
-            using (var client = new HttpClient())
-            {
-                client.DefaultRequestHeaders.Add("Authorization", $"OAuth {_token}");
-                var response = await client.GetAsync(fileUrl);
+            _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("OAuth", _token);
 
-                if (response.IsSuccessStatusCode)
-                {
-                    var fileBytes = await response.Content.ReadAsByteArrayAsync();
-                    await File.WriteAllBytesAsync(downloadPath, fileBytes);
-                    Console.WriteLine($"Файл {fileName} успешно скачан.");
-                }
-                else
-                {
-                    Console.WriteLine($"Ошибка при скачивании {fileName}. Код ошибки: {response.StatusCode}");
-                }
+            // Получение ссылки на скачивание
+            var encodedPath = Uri.EscapeDataString(filePath);
+            var requestUrl = $"https://cloud-api.yandex.net/v1/disk/resources/download?path={encodedPath}";
+
+            var response = await _client.GetAsync(requestUrl);
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"Ошибка при получении ссылки на скачивание для {fileName}. Код ошибки: {response.StatusCode}");
+                return;
             }
+
+            var responseContent = await response.Content.ReadAsStringAsync();
+            var downloadInfo = JsonConvert.DeserializeObject<DownloadInfo>(responseContent);
+            if (downloadInfo?.Href == null)
+            {
+                Console.WriteLine($"Не удалось получить ссылку на скачивание для {fileName}.");
+                return;
+            }
+
+            // Скачивание файла
+            var fileBytes = await _client.GetByteArrayAsync(downloadInfo.Href);
+            await File.WriteAllBytesAsync(downloadPath, fileBytes);
+            Console.WriteLine($"Файл {fileName} успешно скачан.");
         }
+
+        private class DownloadInfo
+        {
+            [JsonProperty("href")]
+            public string Href { get; set; }
+        }
+
 
         private async Task UploadFileAsync(string filePath)
         {
@@ -130,17 +175,14 @@ namespace MusicSyncDesktop
 
         private async Task<string> GetUploadUrlAsync(string yandexFilePath)
         {
-            using (var client = new HttpClient())
-            {
-                client.DefaultRequestHeaders.Add("Authorization", $"OAuth {_token}");
+            // Используем _client для запроса URL загрузки
+            _client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("OAuth", _token);
 
-                // Запрашиваем URL для загрузки файла на Яндекс.Диск
-                var response = await client.GetStringAsync($"https://cloud-api.yandex.net/v1/disk/resources/upload?path={yandexFilePath}&overwrite=true");
+            var response = await _client.GetStringAsync($"https://cloud-api.yandex.net/v1/disk/resources/upload?path={yandexFilePath}&overwrite=true");
 
-                // Преобразуем ответ в объект
-                var uploadInfo = JsonConvert.DeserializeObject<UploadInfo>(response);
-                return uploadInfo?.Href; // Возвращаем ссылку для загрузки
-            }
+            // Преобразуем ответ в объект
+            var uploadInfo = JsonConvert.DeserializeObject<UploadInfo>(response);
+            return uploadInfo?.Href; // Возвращаем ссылку для загрузки
         }
 
         private async Task UploadFileToYandexAsync(string uploadUrl, string localFilePath)
@@ -165,12 +207,82 @@ namespace MusicSyncDesktop
             }
         }
 
+        public async Task ListFilesAsync()
+        {
+            Console.WriteLine($"Listing files in '{_yandexPath}':");
+            try
+            {
+                // Обновляем путь: убираем завершающий '/'
+                var path = _yandexPath.TrimEnd('/');
+
+                _client.DefaultRequestHeaders.Authorization =
+                    new AuthenticationHeaderValue("OAuth", _token);
+
+                var limit = 1000;
+                var encodedPath = Uri.EscapeUriString(path);
+                var requestUrl =
+                    $"https://cloud-api.yandex.net/v1/disk/resources?path={encodedPath}&limit={limit}&fields=items.name,items.path,items.type";
+
+                var response = await _client.GetAsync(requestUrl);
+                if (!response.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Failed to list files: {response.StatusCode}");
+                    Console.WriteLine(await response.Content.ReadAsStringAsync());
+                    return;
+                }
+
+                var json = await response.Content.ReadAsStringAsync();
+                var diskResponse = JsonConvert.DeserializeObject<YandexDiskResponse>(json);
+                if (diskResponse?.Items == null || diskResponse.Items.Count == 0)
+                {
+                    Console.WriteLine("No items found.");
+                    return;
+                }
+
+                foreach (var item in diskResponse.Items)
+                {
+                    Console.WriteLine(item.Type == "file"
+                        ? $"[FILE] {item.Path}"
+                        : $"[DIR ] {item.Path}");
+                }
+            }
+            catch (HttpRequestException ex)
+            {
+                Console.WriteLine("Network error listing files: " + ex.Message);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error listing files: " + ex.Message);
+            }
+        }
+
+
+        private async Task CreateDirectoryIfNotExistsAsync(string yandexDirectoryPath)
+        {
+            // Используем _client для проверки и создания папки
+            _client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("OAuth", _token);
+
+            var response = await _client.GetAsync($"https://cloud-api.yandex.net/v1/disk/resources?path={Uri.EscapeDataString(yandexDirectoryPath)}");
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                var createResponse = await _client.PutAsync($"https://cloud-api.yandex.net/v1/disk/resources?path={Uri.EscapeDataString(yandexDirectoryPath)}", null);
+                if (createResponse.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"Папка '{yandexDirectoryPath}' была успешно создана.");
+                }
+                else
+                {
+                    Console.WriteLine($"Ошибка при создании папки '{yandexDirectoryPath}'. Код ошибки: {createResponse.StatusCode}");
+                }
+            }
+        }
+
         // Класс для парсинга ответа от Яндекс.Диска
         public class UploadInfo
         {
             public string Href { get; set; }
         }
-
     }
 
     public class YandexDiskResponse
@@ -182,6 +294,6 @@ namespace MusicSyncDesktop
     {
         public string Type { get; set; }
         public string PublicUrl { get; set; }
+        public string Path { get; set; }
     }
-
 }

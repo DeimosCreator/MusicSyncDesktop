@@ -47,10 +47,15 @@ class Program
             await syncService.DownloadAllAsync();
             Console.WriteLine("Download completed.");
         }
+        else if (action == "list")
+        {
+            await syncService.ListFilesAsync();
+        }
         else
         {
             Console.WriteLine("Unknown command.");
         }
+
 
         Console.WriteLine("Done. Press Enter to exit.");
         Console.ReadLine();
