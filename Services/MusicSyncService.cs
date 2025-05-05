@@ -16,7 +16,6 @@ namespace MusicSyncDesktop
         private readonly string _yandexPath;
         private readonly HttpClient _client;
 
-        // Добавляем конструктор для инициализации клиента с таймаутом
         public MusicSyncService(string localPath, string token, string yandexPath)
         {
             _localPath = localPath;
@@ -118,7 +117,6 @@ namespace MusicSyncDesktop
             return fileUrls;
         }
 
-
         private async Task DownloadFileAsync(string filePath)
         {
             var fileName = Path.GetFileName(filePath);
@@ -150,13 +148,6 @@ namespace MusicSyncDesktop
             await File.WriteAllBytesAsync(downloadPath, fileBytes);
             Console.WriteLine($"Файл {fileName} успешно скачан.");
         }
-
-        private class DownloadInfo
-        {
-            [JsonProperty("href")]
-            public string Href { get; set; }
-        }
-
 
         private async Task UploadFileAsync(string filePath)
         {
@@ -256,7 +247,6 @@ namespace MusicSyncDesktop
             }
         }
 
-
         private async Task CreateDirectoryIfNotExistsAsync(string yandexDirectoryPath)
         {
             // Используем _client для проверки и создания папки
@@ -281,6 +271,12 @@ namespace MusicSyncDesktop
         // Класс для парсинга ответа от Яндекс.Диска
         public class UploadInfo
         {
+            public string Href { get; set; }
+        }
+
+        private class DownloadInfo
+        {
+            [JsonProperty("href")]
             public string Href { get; set; }
         }
     }
