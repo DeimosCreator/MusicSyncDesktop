@@ -15,50 +15,38 @@ namespace MusicSyncDesktop
         public AuthForm(string authUrl)
         {
             InitializeComponent();
-
             this.authUrl = authUrl;
             this.Load += AuthForm_Load;
         }
 
         private void AuthForm_Load(object sender, EventArgs e)
         {
-            // Создаём и добавляем лейбл загрузки
+            // Лейбл загрузки
             loadingLabel = new Label
             {
                 Text = "Загрузка...",
                 Font = new Font("Arial", 14, FontStyle.Bold),
-                ForeColor = Color.Black,
-                BackColor = Color.Transparent,
                 AutoSize = true,
-                Location = new Point((ClientSize.Width / 2) - 50, 20),
+                Location = new Point((ClientSize.Width - 100) / 2, 20),
                 Anchor = AnchorStyles.Top
             };
             Controls.Add(loadingLabel);
 
-            // Создаём и добавляем WebBrowser
+            // WebBrowser
             web = new WebBrowser
             {
                 Dock = DockStyle.Fill,
                 ScriptErrorsSuppressed = true
             };
-            web.Navigating += Web_Navigating;
-            web.DocumentCompleted += Web_DocumentCompleted;
+            web.Navigating += (s, ev) => loadingLabel.Visible = true;
+            web.DocumentCompleted += (s, ev) => loadingLabel.Visible = false;
             web.Navigated += Web_Navigated;
 
             Controls.Add(web);
-            web.BringToFront(); // Чтобы браузер не перекрыл лейбл
+            web.BringToFront();
 
+            // Запускаем навигацию один раз
             web.Navigate(authUrl);
-        }
-
-        private void Web_Navigating(object sender, WebBrowserNavigatingEventArgs e)
-        {
-            loadingLabel.Visible = true;
-        }
-
-        private void Web_DocumentCompleted(object sender, WebBrowserDocumentCompletedEventArgs e)
-        {
-            loadingLabel.Visible = false;
         }
 
         private void Web_Navigated(object sender, WebBrowserNavigatedEventArgs e)
